@@ -5,6 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
+
+	"solana-high-speed-indexer/internal/worker"
 
 	"github.com/gagliardetto/solana-go/rpc/ws"
 	"go.uber.org/zap"
@@ -12,7 +15,8 @@ import (
 
 // Config stores Solana websocket connection settings.
 type Config struct {
-	WSURL string
+	WSURL        string
+	Transactions chan<- worker.Transaction
 }
 
 // LogListener handles websocket connection and log subscriptions.
@@ -69,6 +73,20 @@ func (l *LogListener) Run(ctx context.Context) error {
 			zap.Int("log_count", len(msg.Value.Logs)),
 			zap.String("err", fmt.Sprint(msg.Value.Err)),
 		)
+
+		if l.cfg.Transactions != nil {
+			tx := worker.Transaction{
+				Signature: msg.Value.Signature.String(),
+				Slot:      msg.Context.Slot,
+				Timestamp: time.Now().UTC(),
+			}
+
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case l.cfg.Transactions <- tx:
+			}
+		}
 	}
 }
 
