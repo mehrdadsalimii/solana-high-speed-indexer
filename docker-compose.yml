@@ -1,0 +1,52 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: solana-indexer-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: solana_indexer
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/migrations/001_create_transactions.sql:/docker-entrypoint-initdb.d/001_create_transactions.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d solana_indexer"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    ports:
+      - "5434:5432"
+
+  redis:
+    image: redis:7-alpine
+    container_name: solana-indexer-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    ports:
+      - "6379:6379"
+
+  indexer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: solana-indexer-app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      POSTGRES_DSN: postgres://postgres:postgres@postgres:5432/solana_indexer?sslmode=disable
+      REDIS_ADDR: redis:6379
+      REDIS_PASSWORD: ""
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:

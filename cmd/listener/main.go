@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"solana-high-speed-indexer/internal/solana"
+	"solana-high-speed-indexer/internal/storage"
 	"solana-high-speed-indexer/internal/worker"
 
 	"go.uber.org/zap"
@@ -26,6 +27,33 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	postgresDSN := getEnv("POSTGRES_DSN", "postgres://postgres:postgres@localhost:5432/solana_indexer?sslmode=disable")
+	redisAddr := getEnv("REDIS_ADDR", "localhost:6379")
+	redisPassword := os.Getenv("REDIS_PASSWORD")
+
+	postgresStore, err := storage.NewPostgresStore(ctx, postgresDSN)
+	if err != nil {
+		logger.Fatal("failed to create postgres store", zap.Error(err))
+	}
+
+	redisStore, err := storage.NewRedisStore(ctx, storage.RedisConfig{
+		Addr:       redisAddr,
+		Password:   redisPassword,
+		ListKey:    "transactions:latest",
+		MaxEntries: 1000,
+	})
+	if err != nil {
+		_ = postgresStore.Close(context.Background())
+		logger.Fatal("failed to create redis store", zap.Error(err))
+	}
+
+	store, err := storage.NewMultiStore(postgresStore, redisStore)
+	if err != nil {
+		_ = redisStore.Close(context.Background())
+		_ = postgresStore.Close(context.Background())
+		logger.Fatal("failed to create storage layer", zap.Error(err))
+	}
+
 	txCh := make(chan worker.Transaction, 1024)
 	const workerCount = 4
 
@@ -33,15 +61,20 @@ func main() {
 		Workers: workerCount,
 		Input:   txCh,
 		Handler: func(ctx context.Context, tx worker.Transaction) error {
-			logger.Info("processed transaction",
+			logger.Info("processing transaction",
 				zap.String("signature", tx.Signature),
 				zap.Uint64("slot", tx.Slot),
 				zap.Time("timestamp", tx.Timestamp),
 			)
+
+			if err := store.SaveTransaction(ctx, tx); err != nil {
+				return err
+			}
 			return nil
 		},
 	}, logger)
 	if err != nil {
+		_ = store.Close(context.Background())
 		logger.Fatal("failed to create worker pool", zap.Error(err))
 	}
 	pool.Run(ctx)
@@ -92,4 +125,18 @@ func main() {
 	} else {
 		logger.Info("worker pool stopped gracefully")
 	}
+
+	if err := store.Close(shutdownCtx); err != nil {
+		logger.Error("storage shutdown failed", zap.Error(err))
+	} else {
+		logger.Info("storage stopped gracefully")
+	}
+}
+
+func getEnv(key, fallback string) string {
+	value := os.Getenv(key)
+	if value == "" {
+		return fallback
+	}
+	return value
 }
